@@ -207,7 +207,7 @@ function addUsage(total, usage) {
 }
 
 export class BatchRunner {
-  constructor({ runner, maxItems = 100, maxBytes = 131_072 }) {
+  constructor({ runner, maxItems = 1000, maxBytes = 131_072 }) {
     this.runner = runner;
     this.maxItems = maxItems;
     this.maxBytes = maxBytes;

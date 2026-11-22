@@ -7,7 +7,7 @@ import { BatchRunner, Runner, readJsonBody } from "../src/runner.js";
 const usage = `Usage:
   subscription-runner connect
   subscription-runner status
-  subscription-runner serve [--port 4312] [--concurrency 1] [--chunk-size 100] [--chunk-bytes 131072] [--timeout-ms 90000]`;
+  subscription-runner serve [--port 4312] [--concurrency 1] [--chunk-size 1000] [--chunk-bytes 131072] [--timeout-ms 90000]`;
 
 const [command, ...args] = process.argv.slice(2);
 const codex = process.env.SUBSCRIPTION_RUNNER_CODEX || "codex";
@@ -31,7 +31,7 @@ const option = (name, fallback) => {
 };
 const port = option("--port", 4312);
 const concurrency = option("--concurrency", 1);
-const chunkSize = option("--chunk-size", 100);
+const chunkSize = option("--chunk-size", 1000);
 const chunkBytes = option("--chunk-bytes", 131_072);
 const timeoutMs = option("--timeout-ms", 90_000);
 

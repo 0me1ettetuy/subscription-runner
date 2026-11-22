@@ -28,7 +28,7 @@ subscription-runner serve
 }
 ```
 
-The runner splits the submitted batch only when needed: at 100 items or 128 KiB of serialized prompt, schema, and inputs per Codex call. Its response returns ordered `results`, the total number of internal `batches`, and aggregate Codex `usage` from `turn.completed` events.
+The runner splits the submitted batch only when needed: at 1,000 items or 128 KiB of serialized prompt, schema, and inputs per Codex call. Its response returns ordered `results`, the total number of internal `batches`, and aggregate Codex `usage` from `turn.completed` events.
 
 Project paths, shell commands, and sandbox overrides are rejected to preserve isolated requests.
 

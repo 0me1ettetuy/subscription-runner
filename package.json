@@ -1,0 +1,17 @@
+{
+  "name": "subscription-runner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local JSON runner for an existing Codex CLI subscription login.",
+  "type": "module",
+  "exports": "./src/runner.js",
+  "bin": {
+    "subscription-runner": "./bin/subscription-runner.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

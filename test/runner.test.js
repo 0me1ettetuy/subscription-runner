@@ -12,9 +12,9 @@ test("Batcher combines compatible jobs and returns each item result", async () =
   const calls = [];
   const batcher = new Batcher({
     runner: {
-      async submit(job) {
+      async submitWithUsage(job) {
         calls.push(job);
-        return { results: job.input.map(({ id, input }) => ({ id, result: { value: input.value } })) };
+        return { result: { results: job.input.map(({ id, input }) => ({ id, result: { value: input.value } })) }, usage: null };
       }
     },
     maxItems: 2,
@@ -40,4 +40,12 @@ test("Runner returns the final structured Codex message", async () => {
     schema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] }
   });
   assert.deepEqual(result, { answer: "ok" });
+});
+
+test("Runner exposes Codex token usage when it is reported", async () => {
+  const codex = fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url));
+  const runner = new Runner({ codex });
+  const completed = await runner.submitWithUsage({ prompt: "answer" });
+  assert.equal(completed.result, '{"answer":"ok"}');
+  assert.deepEqual(completed.usage, { input_tokens: 12, output_tokens: 3 });
 });

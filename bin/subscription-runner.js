@@ -7,7 +7,7 @@ import { Runner, Batcher, readJsonBody } from "../src/runner.js";
 const usage = `Usage:
   subscription-runner connect
   subscription-runner status
-  subscription-runner serve [--port 4312] [--concurrency 1] [--batch-size 10] [--batch-wait-ms 750]`;
+  subscription-runner serve [--port 4312] [--concurrency 1] [--batch-size 10] [--batch-wait-ms 750] [--timeout-ms 90000]`;
 
 const [command, ...args] = process.argv.slice(2);
 const codex = process.env.SUBSCRIPTION_RUNNER_CODEX || "codex";
@@ -33,14 +33,15 @@ const port = option("--port", 4312);
 const concurrency = option("--concurrency", 1);
 const batchSize = option("--batch-size", 10);
 const batchWaitMs = option("--batch-wait-ms", 750);
+const timeoutMs = option("--timeout-ms", 90_000);
 
-if (![port, concurrency, batchSize, batchWaitMs].every(Number.isSafeInteger) ||
-  port < 1 || port > 65535 || concurrency < 1 || batchSize < 1 || batchWaitMs < 0) {
+if (![port, concurrency, batchSize, batchWaitMs, timeoutMs].every(Number.isSafeInteger) ||
+  port < 1 || port > 65535 || concurrency < 1 || batchSize < 1 || batchWaitMs < 0 || timeoutMs < 1) {
   console.error("Invalid numeric option.");
   process.exit(1);
 }
 
-const runner = new Runner({ codex, concurrency });
+const runner = new Runner({ codex, concurrency, timeoutMs });
 const batcher = new Batcher({ runner, maxItems: batchSize, waitMs: batchWaitMs });
 
 const server = createServer(async (request, response) => {
@@ -59,8 +60,8 @@ const server = createServer(async (request, response) => {
 
   try {
     const job = await readJsonBody(request);
-    const result = job.batch === true ? await batcher.submit(job) : await runner.submit(job);
-    response.end(JSON.stringify({ status: "completed", result }));
+    const completed = job.batch === true ? await batcher.submitWithUsage(job) : await runner.submitWithUsage(job);
+    response.end(JSON.stringify({ status: "completed", result: completed.result, usage: completed.usage, batch: completed.batch ?? null }));
   } catch (error) {
     response.statusCode = error.statusCode || 400;
     response.end(JSON.stringify({ error: error.message }));

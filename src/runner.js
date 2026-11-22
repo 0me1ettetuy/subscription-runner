@@ -36,14 +36,19 @@ function finalMessage(event) {
 }
 
 export class Runner {
-  constructor({ codex = "codex", concurrency = 1 }) {
+  constructor({ codex = "codex", concurrency = 1, timeoutMs = 90_000 }) {
     this.codex = codex;
     this.concurrency = concurrency;
+    this.timeoutMs = timeoutMs;
     this.active = 0;
     this.queue = [];
   }
 
   submit(job) {
+    return this.submitWithUsage(job).then(({ result }) => result);
+  }
+
+  submitWithUsage(job) {
     assertJob(job);
     return new Promise((resolve, reject) => {
       this.queue.push({ job, resolve, reject });
@@ -76,12 +81,12 @@ export class Runner {
       }
       args.push(makePrompt(job));
 
-      const { message, stderr, exitCode } = await runProcess(this.codex, args);
+      const { message, stderr, exitCode, usage } = await runProcess(this.codex, args, this.timeoutMs);
       if (exitCode !== 0) throw new RequestError(stderr || `Codex exited with code ${exitCode}.`, 502);
       if (!message) throw new RequestError("Codex returned no final message.", 502);
-      if (!job.schema) return message;
+      if (!job.schema) return { result: message, usage };
       try {
-        return JSON.parse(message);
+        return { result: JSON.parse(message), usage };
       } catch {
         throw new RequestError("Codex final message was not valid JSON.", 502);
       }
@@ -91,28 +96,47 @@ export class Runner {
   }
 }
 
-function runProcess(command, args) {
+function runProcess(command, args, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { shell: process.platform === "win32" });
+    const child = spawn(command, args, {
+      shell: process.platform === "win32",
+      stdio: ["ignore", "pipe", "pipe"]
+    });
     let stdout = "";
     let stderr = "";
     let message;
+    let usage;
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, timeoutMs);
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.on("error", (error) => reject(new RequestError(`Could not start Codex: ${error.message}`, 502)));
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(new RequestError(`Could not start Codex: ${error.message}`, 502));
+    });
     child.on("close", (exitCode) => {
+      clearTimeout(timeout);
+      if (timedOut) {
+        reject(new RequestError(`Codex exceeded the ${timeoutMs} ms job timeout.`, 504));
+        return;
+      }
       for (const line of stdout.split("\n")) {
         if (!line.trim()) continue;
         try {
-          message = finalMessage(JSON.parse(line)) || message;
+          const event = JSON.parse(line);
+          message = finalMessage(event) || message;
+          if (event.type === "turn.completed" && event.usage && typeof event.usage === "object") usage = event.usage;
         } catch {
           // Codex --json output is JSONL; malformed lines are ignored and fail below if no final message arrives.
         }
       }
-      resolve({ message, stderr: stderr.trim(), exitCode });
+      resolve({ message, stderr: stderr.trim(), exitCode, usage: usage ?? null });
     });
   });
 }
@@ -126,6 +150,10 @@ export class Batcher {
   }
 
   submit(job) {
+    return this.submitWithUsage(job).then(({ result }) => result);
+  }
+
+  submitWithUsage(job) {
     assertJob(job);
     if (!job.schema) throw new RequestError("batch jobs require a schema.");
     const key = createHash("sha256").update(JSON.stringify([job.prompt, job.schema])).digest("hex");
@@ -168,11 +196,11 @@ export class Batcher {
     const input = group.entries.map(({ id, input: value }) => ({ id, input: value }));
 
     try {
-      const output = await this.runner.submit({ prompt, input, schema });
-      const results = new Map(output.results.map((entry) => [entry.id, entry.result]));
+      const completed = await this.runner.submitWithUsage({ prompt, input, schema });
+      const results = new Map(completed.result.results.map((entry) => [entry.id, entry.result]));
       for (const entry of group.entries) {
         if (!results.has(entry.id)) entry.reject(new RequestError(`Batch response omitted ${entry.id}.`, 502));
-        else entry.resolve(results.get(entry.id));
+        else entry.resolve({ result: results.get(entry.id), usage: completed.usage, batch: { size: group.entries.length } });
       }
     } catch (error) {
       for (const entry of group.entries) entry.reject(error);

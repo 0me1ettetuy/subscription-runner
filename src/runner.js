@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { createHash, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -141,74 +140,115 @@ function runProcess(command, args, timeoutMs) {
   });
 }
 
-export class Batcher {
-  constructor({ runner, maxItems = 10, waitMs = 750 }) {
-    this.runner = runner;
-    this.maxItems = maxItems;
-    this.waitMs = waitMs;
-    this.groups = new Map();
+function assertBatch(batch) {
+  assertJob(batch);
+  if (!batch.schema) throw new RequestError("schema is required for batch jobs.");
+  if (!Array.isArray(batch.items) || !batch.items.length) {
+    throw new RequestError("items must be a non-empty array.");
   }
-
-  submit(job) {
-    return this.submitWithUsage(job).then(({ result }) => result);
-  }
-
-  submitWithUsage(job) {
-    assertJob(job);
-    if (!job.schema) throw new RequestError("batch jobs require a schema.");
-    const key = createHash("sha256").update(JSON.stringify([job.prompt, job.schema])).digest("hex");
-    let group = this.groups.get(key);
-    if (!group) {
-      group = { job, entries: [], timer: undefined };
-      this.groups.set(key, group);
-      group.timer = setTimeout(() => this.#flush(key, group), this.waitMs);
+  const ids = new Set();
+  for (const item of batch.items) {
+    if (!item || typeof item !== "object" || Array.isArray(item) || typeof item.id !== "string" || !("input" in item)) {
+      throw new RequestError("Each item must contain a string id and an input value.");
     }
-
-    return new Promise((resolve, reject) => {
-      group.entries.push({ id: randomUUID(), input: job.input, resolve, reject });
-      if (group.entries.length >= this.maxItems) this.#flush(key, group);
-    });
-  }
-
-  async #flush(key, group) {
-    if (this.groups.get(key) !== group || group.flushing) return;
-    group.flushing = true;
-    clearTimeout(group.timer);
-    this.groups.delete(key);
-
-    const schema = {
-      type: "object",
-      properties: {
-        results: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: { id: { type: "string" }, result: group.job.schema },
-            required: ["id", "result"],
-            additionalProperties: false
-          }
-        }
-      },
-      required: ["results"],
-      additionalProperties: false
-    };
-    const prompt = `${group.job.prompt}\n\nProcess each independent input exactly once. Preserve every id and return one result for each item.`;
-    const input = group.entries.map(({ id, input: value }) => ({ id, input: value }));
-
-    try {
-      const completed = await this.runner.submitWithUsage({ prompt, input, schema });
-      const results = new Map(completed.result.results.map((entry) => [entry.id, entry.result]));
-      for (const entry of group.entries) {
-        if (!results.has(entry.id)) entry.reject(new RequestError(`Batch response omitted ${entry.id}.`, 502));
-        else entry.resolve({ result: results.get(entry.id), usage: completed.usage, batch: { size: group.entries.length } });
-      }
-    } catch (error) {
-      for (const entry of group.entries) entry.reject(error);
-    }
+    if (ids.has(item.id)) throw new RequestError(`Duplicate item id: ${item.id}.`);
+    ids.add(item.id);
   }
 }
 
-export function readJsonBody(request, maxBytes = 1_000_000) {
+function batchSchema(schema) {
+  return {
+    type: "object",
+    properties: {
+      results: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: { id: { type: "string" }, result: schema },
+          required: ["id", "result"],
+          additionalProperties: false
+        }
+      }
+    },
+    required: ["results"],
+    additionalProperties: false
+  };
+}
+
+export function chunkItems(batch, { maxItems, maxBytes }) {
+  const fixedBytes = Buffer.byteLength(JSON.stringify({ prompt: batch.prompt, schema: batch.schema }));
+  const chunks = [];
+  let chunk = [];
+  let bytes = fixedBytes;
+
+  for (const item of batch.items) {
+    const itemBytes = Buffer.byteLength(JSON.stringify(item));
+    if (chunk.length && (chunk.length === maxItems || bytes + itemBytes > maxBytes)) {
+      chunks.push(chunk);
+      chunk = [];
+      bytes = fixedBytes;
+    }
+    if (fixedBytes + itemBytes > maxBytes) {
+      throw new RequestError(`Item ${item.id} exceeds the ${maxBytes}-byte chunk limit.`, 413);
+    }
+    chunk.push(item);
+    bytes += itemBytes;
+  }
+  if (chunk.length) chunks.push(chunk);
+  return chunks;
+}
+
+function addUsage(total, usage) {
+  if (!usage) return total;
+  for (const [key, value] of Object.entries(usage)) {
+    if (typeof value === "number") total[key] = (total[key] || 0) + value;
+  }
+  return total;
+}
+
+export class BatchRunner {
+  constructor({ runner, maxItems = 100, maxBytes = 131_072 }) {
+    this.runner = runner;
+    this.maxItems = maxItems;
+    this.maxBytes = maxBytes;
+  }
+
+  submit(batch) {
+    return this.submitWithUsage(batch).then(({ results }) => results);
+  }
+
+  async submitWithUsage(batch) {
+    assertBatch(batch);
+    const chunks = chunkItems(batch, this);
+    const completed = await Promise.all(chunks.map((items) => this.#runChunk(batch, items)));
+    const results = new Map();
+    const usage = {};
+
+    for (const chunk of completed) {
+      addUsage(usage, chunk.usage);
+      for (const entry of chunk.result.results) results.set(entry.id, entry.result);
+    }
+
+    return {
+      results: batch.items.map(({ id }) => {
+        if (!results.has(id)) throw new RequestError(`Batch response omitted ${id}.`, 502);
+        return { id, result: results.get(id) };
+      }),
+      usage: Object.keys(usage).length ? usage : null,
+      batches: chunks.length
+    };
+  }
+
+  #runChunk(batch, items) {
+    return this.runner.submitWithUsage({
+      prompt: `${batch.prompt}\n\nProcess each independent input exactly once. Preserve every id and return one result for each item.`,
+      input: items,
+      schema: batchSchema(batch.schema)
+    });
+  }
+}
+
+export function readJsonBody(request, maxBytes = 10_000_000) {
   return new Promise((resolve, reject) => {
     let body = "";
     let bytes = 0;
@@ -216,7 +256,7 @@ export function readJsonBody(request, maxBytes = 1_000_000) {
     request.on("data", (chunk) => {
       bytes += Buffer.byteLength(chunk);
       if (bytes > maxBytes) {
-        reject(new RequestError("Request body exceeds 1 MB.", 413));
+        reject(new RequestError("Request body exceeds 10 MB.", 413));
         request.destroy();
         return;
       }

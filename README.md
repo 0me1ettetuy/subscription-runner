@@ -14,13 +14,23 @@ subscription-runner serve
 
 `connect` delegates to `codex login`; this package never reads credentials. The server listens only on `127.0.0.1:4312`.
 
-## Job format
+## Batch job format
 
-`POST /jobs` accepts `prompt`, optional `input`, and optional JSON `schema`. Project paths, shell commands, and sandbox overrides are rejected to preserve isolated requests.
+`POST /jobs` accepts one complete batch. Every item needs a stable string `id` and its JSON `input`.
 
-Job responses include Codex's reported `usage` from its `turn.completed` event when available. Batch jobs return the shared aggregate usage and batch size; that usage cannot be attributed accurately to one original item.
+```json
+{
+  "prompt": "Extract a name",
+  "schema": { "type": "object" },
+  "items": [
+    { "id": "item-1", "input": { "text": "Ada Lovelace" } }
+  ]
+}
+```
 
-Add `"batch": true` to compatible schema jobs. The runner groups jobs with the same prompt and schema for up to 750 ms (or until ten arrive), sends one Codex request, then resolves every original job separately.
+The runner splits the submitted batch only when needed: at 100 items or 128 KiB of serialized prompt, schema, and inputs per Codex call. Its response returns ordered `results`, the total number of internal `batches`, and aggregate Codex `usage` from `turn.completed` events.
+
+Project paths, shell commands, and sandbox overrides are rejected to preserve isolated requests.
 
 ## Limits
 
